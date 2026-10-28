@@ -1,0 +1,129 @@
+// MySQL 8.0.19+ is required (bulk upserts use the `INSERT ... AS new` alias form).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+/// A listed NEPSE security. `nepseSecurityId` is the numeric id used by
+/// nepalstock.com.np in /api/nots/security/{id}.
+model Instrument {
+  id              Int       @id @default(autoincrement())
+  symbol          String    @unique @db.VarChar(20)
+  nepseSecurityId Int       @unique @map("nepse_security_id")
+  name            String?   @db.VarChar(255)
+  sector          String?   @db.VarChar(120)
+  instrumentType  String?   @map("instrument_type") @db.VarChar(60)
+  isActive        Boolean   @default(true) @map("is_active")
+  /// Last time a provider response for this instrument was stored.
+  lastSyncedAt    DateTime? @map("last_synced_at") @db.DateTime(3)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.DateTime(3)
+
+  candles DailyCandle[]
+  quote   Quote?
+
+  @@index([name])
+  @@map("instruments")
+}
+
+/// One trading session per instrument. `tradeDate` is the NEPSE business date
+/// (Asia/Kathmandu calendar), not an instant. Prices are unadjusted.
+model DailyCandle {
+  id            BigInt       @id @default(autoincrement())
+  instrumentId  Int          @map("instrument_id")
+  tradeDate     DateTime     @map("trade_date") @db.Date
+  open          Decimal      @db.Decimal(14, 4)
+  high          Decimal      @db.Decimal(14, 4)
+  low           Decimal      @db.Decimal(14, 4)
+  close         Decimal      @db.Decimal(14, 4)
+  volume        BigInt       @db.UnsignedBigInt
+  trades        Int?         @db.UnsignedInt
+  /// True while the session was still open when this candle was captured.
+  isProvisional Boolean      @default(false) @map("is_provisional")
+  source        CandleSource
+  createdAt     DateTime     @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt     DateTime     @updatedAt @map("updated_at") @db.DateTime(3)
+
+  instrument Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+
+  /// Prevents duplicate sessions and serves chronological range scans.
+  @@unique([instrumentId, tradeDate])
+  @@map("daily_candles")
+}
+
+/// Latest snapshot quote per instrument, as returned by /api/nots/security/{id}.
+model Quote {
+  instrumentId     Int       @id @map("instrument_id")
+  businessDate     DateTime  @map("business_date") @db.Date
+  lastTradedPrice  Decimal   @map("last_traded_price") @db.Decimal(14, 4)
+  previousClose    Decimal?  @map("previous_close") @db.Decimal(14, 4)
+  totalTradedQty   BigInt?   @map("total_traded_qty") @db.UnsignedBigInt
+  totalTrades      Int?      @map("total_trades") @db.UnsignedInt
+  fiftyTwoWeekHigh Decimal?  @map("fifty_two_week_high") @db.Decimal(14, 4)
+  fiftyTwoWeekLow  Decimal?  @map("fifty_two_week_low") @db.Decimal(14, 4)
+  /// Provider's lastUpdatedDateTime converted to UTC.
+  sourceUpdatedAt  DateTime? @map("source_updated_at") @db.DateTime(3)
+  /// Whether the market reported itself open when this quote was fetched.
+  marketOpen       Boolean   @map("market_open")
+  fetchedAt        DateTime  @map("fetched_at") @db.DateTime(3)
+
+  instrument Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+
+  @@map("quotes")
+}
+
+model IngestionRun {
+  id           Int                @id @default(autoincrement())
+  type         IngestionRunType
+  status       IngestionRunStatus
+  params       Json?
+  startedAt    DateTime           @default(now()) @map("started_at") @db.DateTime(3)
+  heartbeatAt  DateTime           @default(now()) @map("heartbeat_at") @db.DateTime(3)
+  finishedAt   DateTime?          @map("finished_at") @db.DateTime(3)
+  requested    Int                @default(0)
+  processed    Int                @default(0)
+  inserted     Int                @default(0)
+  updated      Int                @default(0)
+  unchanged    Int                @default(0)
+  skipped      Int                @default(0)
+  failed       Int                @default(0)
+  errorMessage String?            @map("error_message") @db.Text
+  /// Skipped records and per-symbol failures (capped).
+  details      Json?
+
+  @@index([type, status, finishedAt])
+  @@map("ingestion_runs")
+}
+
+/// Mutual-exclusion lock so ingestion runs never overlap, even across processes.
+model IngestionLock {
+  name       String   @id @db.VarChar(50)
+  owner      String   @db.VarChar(64)
+  acquiredAt DateTime @map("acquired_at") @db.DateTime(3)
+  expiresAt  DateTime @map("expires_at") @db.DateTime(3)
+
+  @@map("ingestion_locks")
+}
+
+enum CandleSource {
+  NEPSE
+  CSV_IMPORT
+}
+
+enum IngestionRunType {
+  SYNC
+  BACKFILL
+}
+
+enum IngestionRunStatus {
+  RUNNING
+  SUCCEEDED
+  PARTIAL
+  FAILED
+  ABANDONED
+}
