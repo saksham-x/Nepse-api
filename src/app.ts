@@ -23,8 +23,8 @@ export function createApp(): Express {
     pinoHttp({
       logger,
       genReqId: (req) => req.id,
-      // Successful and client-aborted requests are debug noise; set LOG_LEVEL=debug to see them.
-      customLogLevel: (_req, res, err) => (err || res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'debug'),
+      // Per-request lines are debug noise (server errors are logged by errorHandler); set LOG_LEVEL=debug to see them.
+      customLogLevel: () => 'debug',
       serializers: {
         req: (req: { id: string; method: string; url: string }) => ({ id: req.id, method: req.method, url: req.url }),
         res: (res: { statusCode: number }) => ({ statusCode: res.statusCode }),

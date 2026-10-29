@@ -61,7 +61,7 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, next) => {
   if (appError.status >= 500) {
     log.error({ err, code: appError.code }, 'request failed');
   } else {
-    log.warn({ code: appError.code, message: (err as Error)?.message }, 'request rejected');
+    log.debug({ code: appError.code, message: (err as Error)?.message }, 'request rejected');
   }
 
   res.status(appError.status).json({
