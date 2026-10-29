@@ -4,12 +4,14 @@ import { env } from './config/env.js';
 import { logger } from './config/logger.js';
 import { prisma } from './config/prisma.js';
 import { getIngestionService, IngestionLockedError } from './modules/ingestion/ingestion.service.js';
+import { attachRealtime } from './modules/realtime/realtime.server.js';
 
 const SHUTDOWN_TIMEOUT_MS = 15_000;
 
 const server: Server = createApp().listen(env.PORT, env.HOST, () => {
   logger.info({ host: env.HOST, port: env.PORT, env: env.NODE_ENV }, 'nepse-api listening');
 });
+const realtime = attachRealtime(server);
 
 // ---------------------------------------------------------------------------
 // Optional in-process scheduler (single-instance deployments only; see README).
@@ -57,6 +59,7 @@ async function shutdown(signal: string): Promise<void> {
 
   shutdownController.abort();
   clearTimeout(schedulerTimer);
+  await realtime.close();
   const closed = new Promise<void>((resolve) => server.close(() => resolve()));
   server.closeIdleConnections();
   await closed;

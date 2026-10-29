@@ -3,7 +3,7 @@ import { env } from '../../../config/env.js';
 import { logger as rootLogger, type Logger } from '../../../config/logger.js';
 import { sleep as defaultSleep } from '../../../common/utils/concurrency.js';
 import { kathmanduDate, kathmanduDayOfMonth, parseKathmanduDateTime } from '../../../common/utils/time.js';
-import { generateAuthorizationKey, securityPayloadId } from './nepse.auth.js';
+import { generateAuthorizationKey, graphPayloadId, securityPayloadId } from './nepse.auth.js';
 import { ProviderError } from './provider-error.js';
 import {
   marketOpenResponseSchema,
@@ -28,6 +28,7 @@ export interface NepseProviderOptions {
 interface Session {
   authorization: string;
   payloadId: number;
+  graphPayloadId: number;
   marketStatus: MarketStatus;
   createdAt: number;
 }
@@ -35,12 +36,13 @@ interface Session {
 export const NEPSE_SOURCE = 'nepalstock.com.np';
 
 /**
- * Client for the unofficial nepalstock.com.np web API, limited to the three
- * endpoints the original implementation used:
+ * Client for the unofficial nepalstock.com.np web API:
  *
  *   GET  /api/authenticate/prove           -> accessToken + salts
  *   GET  /api/nots/nepse-data/market-open  -> market status + payload id seed
  *   POST /api/nots/security/{securityId}   -> security detail + daily trade snapshot
+ *   GET  /api/nots/nepse-index             -> summary of every index
+ *   POST /api/nots/graph/index/{indexId}   -> intraday index points (best effort)
  *
  * A "session" (Authorization header + payload id) is created once and reused
  * for `sessionTtlMs`, instead of re-authenticating for every symbol.
@@ -67,15 +69,42 @@ export class NepseProvider {
   }
 
   /** Raw security detail. Validation/mapping happens in nepse.mapper.ts. */
-  async getSecurityDetail(securityId: number): Promise<{ data: unknown; marketStatus: MarketStatus }> {
+  getSecurityDetail(securityId: number): Promise<{ data: unknown; marketStatus: MarketStatus }> {
+    return this.withSession((session) =>
+      this.request(`/api/nots/security/${securityId}`, {
+        method: 'POST',
+        headers: { Authorization: session.authorization, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: session.payloadId }),
+      }),
+    );
+  }
+
+  /** Raw summary of every NEPSE index (current value, change, day range). */
+  getIndexSummary(): Promise<{ data: unknown; marketStatus: MarketStatus }> {
+    return this.withSession((session) =>
+      this.request('/api/nots/nepse-index', {
+        headers: { Authorization: session.authorization, 'Content-Type': 'application/json' },
+      }),
+    );
+  }
+
+  /** Raw intraday points for one index (58 = NEPSE Index) for the current or last session. */
+  getIndexGraph(indexId: number): Promise<{ data: unknown; marketStatus: MarketStatus }> {
+    return this.withSession((session) =>
+      this.request(`/api/nots/graph/index/${indexId}`, {
+        method: 'POST',
+        headers: { Authorization: session.authorization, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: session.graphPayloadId }),
+      }),
+    );
+  }
+
+  /** Runs an authenticated request, re-authenticating once if the token is rejected. */
+  private async withSession(fn: (session: Session) => Promise<unknown>): Promise<{ data: unknown; marketStatus: MarketStatus }> {
     for (let attempt = 0; ; attempt++) {
       const session = await this.getSession();
       try {
-        const data = await this.request(`/api/nots/security/${securityId}`, {
-          method: 'POST',
-          headers: { Authorization: session.authorization, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: session.payloadId }),
-        });
+        const data = await fn(session);
         return { data, marketStatus: session.marketStatus };
       } catch (err) {
         // A rejected token usually means the session expired early: re-authenticate once.
@@ -114,9 +143,11 @@ export class NepseProvider {
 
     const now = this.now();
     const asOf = parseKathmanduDateTime(market.asOf);
+    const payloadId = securityPayloadId(market.id, kathmanduDayOfMonth(now));
     const session: Session = {
       authorization,
-      payloadId: securityPayloadId(market.id, kathmanduDayOfMonth(now)),
+      payloadId,
+      graphPayloadId: graphPayloadId(payloadId, prove, kathmanduDayOfMonth(now)),
       marketStatus: {
         isOpen: !/^close/i.test(market.isOpen.trim()),
         rawStatus: market.isOpen,

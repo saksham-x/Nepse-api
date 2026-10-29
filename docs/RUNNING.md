@@ -104,8 +104,10 @@ This inserts the 573 NEPSE symbols and their security ids. It is safe to run aga
 Start with a couple of symbols so you can check the output quickly:
 
 ```powershell
-npm run sync -- --symbols NABIL,ADBL
+npm run sync '--' --symbols NABIL,ADBL
 ```
+
+> **PowerShell and `--`.** Windows PowerShell removes a bare `--` before npm sees it, so `npm run sync -- --symbols X` fails with `Unknown cli flag: --symbols`. Quote it as `'--'` (this works in bash too), or call the job directly: `npx tsx src/jobs/sync-market-data.ts --symbols X`. The same applies to every `npm run backfill -- …` command below.
 
 At the end, the log shows a summary with `status` and counts (`inserted`, `updated`, `skipped`, `failed`).
 
@@ -189,8 +191,8 @@ NABIL,2024-06-10,520.00,531.00,515.10,528.00,104233
 Preview first, then import:
 
 ```powershell
-npm run backfill -- --file data\history.csv --dry-run
-npm run backfill -- --file data\history.csv
+npm run backfill '--' --file data\history.csv --dry-run
+npm run backfill '--' --file data\history.csv
 ```
 
 - Useful filters: `--symbols NABIL,ADBL`, `--from 2023-01-01`, `--to 2023-12-31`.

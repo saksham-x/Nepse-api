@@ -52,6 +52,12 @@ const envSchema = z.object({
 
   QUOTE_MAX_AGE_SECONDS: int(300, 1),
   QUOTE_ON_DEMAND_REFRESH: bool,
+
+  LIVE_FEED_ENABLED: z.enum(['true', 'false', '1', '0']).default('true').transform((v) => v === 'true' || v === '1'),
+  LIVE_POLL_OPEN_SECONDS: int(10, 5),
+  LIVE_POLL_CLOSED_SECONDS: int(300, 30),
+  LIVE_MAX_SYMBOLS: int(100, 1),
+  LIVE_MAX_SYMBOLS_PER_CLIENT: int(20, 1),
 });
 
 export type Env = z.infer<typeof envSchema>;

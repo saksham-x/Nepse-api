@@ -71,6 +71,31 @@ export const securityDetailResponseSchema = z.looseObject({
 });
 export type SecurityDetailResponse = z.infer<typeof securityDetailResponseSchema>;
 
+/**
+ * GET /api/nots/nepse-index: one entry per index (NEPSE, Sensitive, Float, ...).
+ * Field names follow commonly observed payloads; like the security endpoint they
+ * could not be checked against a live response.
+ */
+export const indexSummaryItemSchema = z.looseObject({
+  id: num,
+  index: z.string(),
+  currentValue: optNum,
+  close: optNum,
+  high: optNum,
+  low: optNum,
+  previousClose: optNum,
+  change: optNum,
+  perChange: optNum,
+  fiftyTwoWeekHigh: optNum,
+  fiftyTwoWeekLow: optNum,
+  generatedTime: optStr,
+});
+export type IndexSummaryItem = z.infer<typeof indexSummaryItemSchema>;
+export const indexSummaryResponseSchema = z.array(z.unknown());
+
+/** POST /api/nots/graph/index/{id}: today's intraday points as [epochSeconds, value]. */
+export const indexGraphResponseSchema = z.array(z.unknown());
+
 /** Parsed market status, shared by every request in a provider session. */
 export interface MarketStatus {
   isOpen: boolean;

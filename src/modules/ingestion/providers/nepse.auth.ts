@@ -88,3 +88,15 @@ export function securityPayloadId(marketOpenId: number, dayOfMonth: number): num
   }
   return base + marketOpenId + 2 * dayOfMonth;
 }
+
+/**
+ * Body id for the graph endpoints (POST /api/nots/graph/...). The NEPSE site
+ * salts the security payload id further for these; this follows the widely
+ * used NepseUnofficialApi port and has not been checked against a live server.
+ */
+export function graphPayloadId(scripPayloadId: number, salts: ProveSalts, dayOfMonth: number): number {
+  const low = scripPayloadId % 10 < 5;
+  const multiplier = low ? salts.salt4 : salts.salt2;
+  const offset = low ? salts.salt3 : salts.salt1;
+  return scripPayloadId + multiplier * dayOfMonth - offset;
+}

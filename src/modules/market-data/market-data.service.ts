@@ -127,6 +127,17 @@ function toQuoteDto(symbol: string, q: Quote) {
   };
 }
 
+export type QuoteDto = ReturnType<typeof toQuoteDto>;
+
+/** Stored quote and newest daily candle for an instrument; what live subscribers receive. */
+export async function getLiveSnapshot(instrument: Instrument): Promise<{ symbol: string; quote: QuoteDto | null; candle: Candle | null }> {
+  const [quote, bars] = await Promise.all([
+    repo.findQuote(instrument.id),
+    repo.findDailyBarsDesc({ instrumentId: instrument.id, take: 1 }),
+  ]);
+  return { symbol: instrument.symbol, quote: quote ? toQuoteDto(instrument.symbol, quote) : null, candle: bars[0] ?? null };
+}
+
 const ageSeconds = (q: Quote, now: Date) => Math.max(0, Math.round((now.getTime() - q.fetchedAt.getTime()) / 1000));
 
 export async function getQuote(symbol: string) {

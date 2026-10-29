@@ -235,6 +235,50 @@ GET /api/v1/indicators/NABIL?type=rsi&period=14&interval=1d&limit=300
 - **Precision**: calculations use float64 and responses are rounded to 4 decimals.
 - These are descriptive statistics only. The API does not produce buy or sell signals.
 
+### WebSocket (Socket.IO)
+
+The API server also accepts [Socket.IO](https://socket.io) v4 connections on the same host and port (path `/socket.io`, same `CORS_ORIGINS`). It serves both live and historical data.
+
+```js
+import { io } from 'socket.io-client';
+const socket = io('http://localhost:3000', { transports: ['websocket'] });
+
+// Historical: same parameters as the REST endpoints, plus `symbol`.
+const candles = await socket.emitWithAck('candles:get', { symbol: 'NABIL', interval: '1d', limit: 300 });
+const rsi = await socket.emitWithAck('indicators:get', { symbol: 'NABIL', type: 'rsi', period: 14 });
+const quote = await socket.emitWithAck('quote:get', { symbol: 'NABIL' });
+
+// Live: current snapshot in the ack, then pushes whenever the data changes.
+const sub = await socket.emitWithAck('subscribe', { symbols: ['NABIL', 'ADBL'] });
+socket.on('snapshot', ({ symbol, quote, candle }) => { /* update chart and quote card */ });
+socket.on('market', ({ isOpen, rawStatus, asOf }) => { /* market open/closed banner */ });
+await socket.emitWithAck('unsubscribe', { symbols: ['ADBL'] }); // omit symbols to drop all
+```
+
+Every client event needs an acknowledgement callback. Acks are `{ ok: true, data, meta? }` or `{ ok: false, error: { code, message, details? } }`, with the same `data`/`meta` as REST and the codes listed under [Error codes](#error-codes).
+
+| Client event | Payload | Ack `data` |
+| --- | --- | --- |
+| `candles:get` | `{ symbol, interval?, from?, to?, before?, limit?, format? }` | As `GET /market-data/:symbol/candles` |
+| `indicators:get` | `{ symbol, type, period?, … }` | As `GET /indicators/:symbol` |
+| `quote:get` | `{ symbol }` | As `GET /market-data/:symbol/quote` |
+| `subscribe` | `{ symbols: string[] }` | `{ subscribed, snapshots, market }` |
+| `unsubscribe` | `{ symbols?: string[] }` | `{ subscribed }` |
+| `index:subscribe` | none | `{ snapshot, points }`: the NEPSE Index and today's intraday points so far (`snapshot` is `null` until the first poll) |
+| `index:unsubscribe` | none | `{ subscribed: false }` |
+
+| Server event | Payload |
+| --- | --- |
+| `snapshot` | `{ symbol, quote, candle }`: the stored quote (same shape as the quote endpoint's `data`) and the newest daily candle, which has `provisional: true` while the session is open |
+| `market` | `{ isOpen, rawStatus, asOf, asOfDate }`, sent to every connection when it changes |
+| `index` | `{ snapshot, point }`: the NEPSE Index (`value`, `change`, `changePercent`, `high`, `low`, `previousClose`, 52-week range, `asOf`, `marketOpen`) and the intraday point this poll added (`{ time: unixSeconds, value }`, or `null` while closed) |
+
+The NEPSE Index is polled from `GET /api/nots/nepse-index` every `LIVE_POLL_OPEN_SECONDS` (default 10) while anyone is subscribed and the market is open. The server keeps the current session's intraday series in memory and adds one point per poll. When it starts or a new session begins, it also tries `POST /api/nots/graph/index/58` to fill in the session so far. That endpoint's salted payload id follows the NepseUnofficialApi port and is unverified. If it fails, the series is built from polls alone, and the server retries at most every 5 minutes. After a restart during trading hours without the graph endpoint, the chart starts from the restart.
+
+How live data works: NEPSE offers no push feed, so the server polls `/api/nots/security/{id}` for **subscribed symbols only**, every `LIVE_POLL_OPEN_SECONDS` while the market is open and every `LIVE_POLL_CLOSED_SECONDS` otherwise. A newly subscribed symbol with a stale quote is refreshed immediately. Each refresh is stored like a sync, so REST reads see the same data, and a `snapshot` is pushed only when prices, volume or the candle actually changed. "Live" therefore means as fresh as the poll interval and NEPSE's own update delay, not tick by tick.
+
+Limits: `LIVE_MAX_SYMBOLS_PER_CLIENT` symbols per connection and `LIVE_MAX_SYMBOLS` distinct symbols per process (`SUBSCRIPTION_LIMIT` when exceeded); socket events share the `API_RATE_LIMIT_MAX` per-window budget per connection; messages over 64 KB are dropped.
+
 ### Error codes
 
 | HTTP | `code` | When |
@@ -246,6 +290,7 @@ GET /api/v1/indicators/NABIL?type=rsi&period=14&interval=1d&limit=300
 | 404 | `INSTRUMENT_NOT_FOUND` | Unknown symbol |
 | 404 | `QUOTE_NOT_AVAILABLE` | Known symbol with no stored quote |
 | 429 | `RATE_LIMITED` | Over `API_RATE_LIMIT_MAX` requests per window (standard `RateLimit` headers) |
+| 429 | `SUBSCRIPTION_LIMIT` | Socket subscription over `LIVE_MAX_SYMBOLS_PER_CLIENT` or `LIVE_MAX_SYMBOLS` |
 | 502 | `REFRESH_FAILED` | Upstream responded, but with unusable data |
 | 503 | `UPSTREAM_UNAVAILABLE` | Upstream unreachable, refusing or rate limiting us |
 | 504 | `UPSTREAM_TIMEOUT` | Upstream timed out |
@@ -272,6 +317,7 @@ src/
   modules/
     instruments/              search + details
     market-data/              candles (paging, aggregation), quotes
+    realtime/                 Socket.IO server + live feed poller
     indicators/               SMA/EMA/RSI/MACD (pure functions in calculations/)
     ingestion/
       ingestion.service.ts    sync, CSV backfill, on-demand refresh
@@ -315,6 +361,7 @@ The database lock already prevents overlapping ingestion across processes. Befor
 2. The API rate limiter keeps counts in memory per process. Use a shared store if limits must be global.
 3. The on-demand quote refresh only de-duplicates within a process, and each process runs its own provider throttle. Total upstream request rates grow with the number of instances, so keep `QUOTE_ON_DEMAND_REFRESH=false` or lower the provider rate.
 4. Set `TRUST_PROXY` to match your load balancer so rate limiting sees client IPs.
+5. Each process polls NEPSE for its own socket subscribers and pushes only to its own connections. Behind a load balancer, enable sticky sessions (or use `transports: ['websocket']` on clients), and expect upstream polling to multiply with instances. Sharing one feed across instances would need a Socket.IO adapter such as Redis.
 
 ### Frontend responsibilities
 
