@@ -58,6 +58,17 @@ const envSchema = z.object({
   LIVE_POLL_CLOSED_SECONDS: int(300, 30),
   LIVE_MAX_SYMBOLS: int(100, 1),
   LIVE_MAX_SYMBOLS_PER_CLIENT: int(20, 1),
+
+  /** Lifetime of a login session. */
+  SESSION_TTL_DAYS: int(30, 1),
+  /** How long "Sign in as admin" lasts before the password is asked again. */
+  ADMIN_SESSION_MINUTES: int(60, 5),
+  /** Emails that become platform admins when they register or log in. */
+  PLATFORM_ADMIN_EMAILS: csv.transform((list) => list.map((s) => s.toLowerCase())),
+  AUTH_RATE_LIMIT_MAX: int(20, 1),
+  /** Where deposit screenshots and holding documents are stored. */
+  UPLOAD_DIR: z.string().default('uploads'),
+  UPLOAD_MAX_MB: int(5, 1).pipe(z.number().max(50)),
 });
 
 export type Env = z.infer<typeof envSchema>;

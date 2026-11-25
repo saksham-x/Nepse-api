@@ -1,5 +1,6 @@
 import type { ErrorRequestHandler } from 'express';
 import { Prisma } from '@prisma/client';
+import { MulterError } from 'multer';
 import { ZodError } from 'zod';
 import { env } from '../../config/env.js';
 import { AppError, ErrorCode } from '../errors/app-error.js';
@@ -26,6 +27,12 @@ export function toAppError(err: unknown): AppError {
   }
   if (bodyErr?.type === 'entity.too.large') {
     return new AppError(413, ErrorCode.PAYLOAD_TOO_LARGE, 'Request body is too large');
+  }
+
+  if (err instanceof MulterError) {
+    return err.code === 'LIMIT_FILE_SIZE'
+      ? new AppError(413, ErrorCode.PAYLOAD_TOO_LARGE, `File is larger than ${env.UPLOAD_MAX_MB} MB`)
+      : new AppError(400, ErrorCode.FILE_REJECTED, 'The upload was rejected', { reason: err.code });
   }
 
   if (err instanceof ProviderError) {

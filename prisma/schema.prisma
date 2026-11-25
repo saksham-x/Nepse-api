@@ -127,3 +127,497 @@ enum IngestionRunStatus {
   FAILED
   ABANDONED
 }
+
+// ===========================================================================
+// Accounts and portfolios
+// ===========================================================================
+
+/// A person who can log in. `platformRole` PLATFORM_ADMIN oversees every portfolio.
+model User {
+  id                Int          @id @default(autoincrement())
+  email             String       @unique @db.VarChar(255)
+  passwordHash      String       @map("password_hash") @db.VarChar(255)
+  name              String       @db.VarChar(120)
+  phone             String?      @db.VarChar(30)
+  platformRole      PlatformRole @default(USER) @map("platform_role")
+  status            UserStatus   @default(ACTIVE)
+  language          String       @default("en") @db.VarChar(5)
+  theme             String       @default("system") @db.VarChar(10)
+  /// { paymentDue, depositUpdates, trades, exits }: booleans, all default true.
+  notificationPrefs Json?        @map("notification_prefs")
+  lastLoginAt       DateTime?    @map("last_login_at") @db.DateTime(3)
+  createdAt         DateTime     @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt         DateTime     @updatedAt @map("updated_at") @db.DateTime(3)
+
+  sessions      Session[]
+  memberships   Membership[]
+  notifications Notification[]
+
+  @@map("users")
+}
+
+/// Login session. Only the SHA-256 of the cookie token is stored.
+model Session {
+  id         String    @id @db.Char(64)
+  userId     Int       @map("user_id")
+  createdAt  DateTime  @default(now()) @map("created_at") @db.DateTime(3)
+  expiresAt  DateTime  @map("expires_at") @db.DateTime(3)
+  lastSeenAt DateTime  @default(now()) @map("last_seen_at") @db.DateTime(3)
+  /// Set by "Sign in as admin" (password re-entered). Platform admin routes need it to be in the future.
+  adminUntil DateTime? @map("admin_until") @db.DateTime(3)
+  userAgent  String?   @map("user_agent") @db.VarChar(255)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Portfolio {
+  id                 Int             @id @default(autoincrement())
+  name               String          @db.VarChar(120)
+  type               PortfolioType   @default(GROUP)
+  status             PortfolioStatus @default(ACTIVE)
+  /// Monthly contribution per member, in NPR.
+  contributionAmount Decimal         @default(0) @map("contribution_amount") @db.Decimal(18, 4)
+  /// Day of month (1-28) a contribution is due.
+  dueDay             Int             @default(10) @map("due_day") @db.UnsignedTinyInt
+  /// Days after the due day before a payment counts as late.
+  graceDays          Int             @default(0) @map("grace_days") @db.UnsignedTinyInt
+  lateFee            Decimal         @default(0) @map("late_fee") @db.Decimal(18, 4)
+  /// NAV per unit before anyone holds units.
+  initialUnitPrice   Decimal         @default(10) @map("initial_unit_price") @db.Decimal(18, 6)
+  /// First contribution month, 'YYYY-MM'.
+  startMonth         String          @map("start_month") @db.Char(7)
+  membersSeeTracker  Boolean         @default(false) @map("members_see_tracker")
+  membersSeeShares   Boolean         @default(false) @map("members_see_shares")
+  /// { bankName, accountName, accountNumber, branch, esewaId, esewaName, instructions }
+  paymentDetails     Json?           @map("payment_details")
+  createdById        Int             @map("created_by_id")
+  createdAt          DateTime        @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt          DateTime        @updatedAt @map("updated_at") @db.DateTime(3)
+
+  memberships     Membership[]
+  invitations     Invitation[]
+  deposits        Deposit[]
+  holdings        Holding[]
+  transactions    PortfolioTransaction[]
+  unitEntries     UnitEntry[]
+  navSnapshots    NavSnapshot[]
+  exitRequests    ExitRequest[]
+  cashAccounts    CashAccount[]
+  reconciliations CashReconciliation[]
+
+  @@map("portfolios")
+}
+
+model Membership {
+  id          Int              @id @default(autoincrement())
+  portfolioId Int              @map("portfolio_id")
+  userId      Int              @map("user_id")
+  role        MemberRole       @default(MEMBER)
+  status      MembershipStatus @default(ACTIVE)
+  joinedAt    DateTime         @default(now()) @map("joined_at") @db.DateTime(3)
+  leftAt      DateTime?        @map("left_at") @db.DateTime(3)
+
+  portfolio    Portfolio     @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deposits     Deposit[]
+  unitEntries  UnitEntry[]
+  exitRequests ExitRequest[]
+
+  @@unique([portfolioId, userId])
+  @@map("memberships")
+}
+
+/// Invitation by email, accepted from the invitee's home page once they have an account.
+model Invitation {
+  id          Int              @id @default(autoincrement())
+  portfolioId Int              @map("portfolio_id")
+  email       String           @db.VarChar(255)
+  role        MemberRole       @default(MEMBER)
+  status      InvitationStatus @default(PENDING)
+  invitedById Int              @map("invited_by_id")
+  createdAt   DateTime         @default(now()) @map("created_at") @db.DateTime(3)
+  respondedAt DateTime?        @map("responded_at") @db.DateTime(3)
+
+  portfolio Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+
+  @@index([email, status])
+  @@map("invitations")
+}
+
+model Deposit {
+  id              Int           @id @default(autoincrement())
+  portfolioId     Int           @map("portfolio_id")
+  membershipId    Int           @map("membership_id")
+  amount          Decimal       @db.Decimal(18, 4)
+  /// Contribution month this pays for, 'YYYY-MM'.
+  period          String        @db.Char(7)
+  method          PaymentMethod @default(BANK)
+  status          DepositStatus @default(PENDING)
+  reference       String?       @db.VarChar(120)
+  note            String?       @db.VarChar(500)
+  screenshotPath  String?       @map("screenshot_path") @db.VarChar(255)
+  screenshotMime  String?       @map("screenshot_mime") @db.VarChar(60)
+  rejectionReason String?       @map("rejection_reason") @db.VarChar(500)
+  receiptNo       String?       @unique @map("receipt_no") @db.VarChar(40)
+  navAtApproval   Decimal?      @map("nav_at_approval") @db.Decimal(18, 6)
+  unitsIssued     Decimal?      @map("units_issued") @db.Decimal(20, 6)
+  submittedById   Int           @map("submitted_by_id")
+  reviewedById    Int?          @map("reviewed_by_id")
+  submittedAt     DateTime      @default(now()) @map("submitted_at") @db.DateTime(3)
+  reviewedAt      DateTime?     @map("reviewed_at") @db.DateTime(3)
+
+  portfolio  Portfolio  @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  membership Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+
+  @@index([portfolioId, status])
+  @@index([membershipId, period])
+  @@map("deposits")
+}
+
+/// Something the portfolio owns. Quantity and cost come from replaying transactions.
+model Holding {
+  id             Int         @id @default(autoincrement())
+  portfolioId    Int         @map("portfolio_id")
+  assetType      AssetType   @map("asset_type")
+  /// NEPSE symbol for listed securities; enables price auto-sync.
+  symbol         String?     @db.VarChar(20)
+  name           String      @db.VarChar(160)
+  sector         String?     @db.VarChar(120)
+  currentPrice   Decimal     @default(0) @map("current_price") @db.Decimal(18, 4)
+  priceSource    PriceSource @default(MANUAL) @map("price_source")
+  priceUpdatedAt DateTime?   @map("price_updated_at") @db.DateTime(3)
+  notes          String?     @db.Text
+  archived       Boolean     @default(false)
+  createdAt      DateTime    @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt      DateTime    @updatedAt @map("updated_at") @db.DateTime(3)
+
+  portfolio    Portfolio              @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  documents    HoldingDocument[]
+  transactions PortfolioTransaction[]
+
+  @@index([portfolioId])
+  @@map("holdings")
+}
+
+model HoldingDocument {
+  id           Int      @id @default(autoincrement())
+  holdingId    Int      @map("holding_id")
+  fileName     String   @map("file_name") @db.VarChar(200)
+  storagePath  String   @map("storage_path") @db.VarChar(255)
+  mime         String   @db.VarChar(100)
+  size         Int      @db.UnsignedInt
+  uploadedById Int      @map("uploaded_by_id")
+  createdAt    DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  holding Holding @relation(fields: [holdingId], references: [id], onDelete: Cascade)
+
+  @@map("holding_documents")
+}
+
+/// Every money or asset movement. Cash and holdings are derived by replaying the active rows.
+model PortfolioTransaction {
+  id          Int               @id @default(autoincrement())
+  portfolioId Int               @map("portfolio_id")
+  type        TransactionType
+  status      TransactionStatus @default(ACTIVE)
+  holdingId   Int?              @map("holding_id")
+  date        DateTime          @db.Date
+  quantity    Decimal?          @db.Decimal(20, 6)
+  price       Decimal?          @db.Decimal(18, 4)
+  /// Cash amount for DIVIDEND, FEE, WITHDRAWAL, DEPOSIT, EXIT_PAYOUT and ADJUSTMENT (signed).
+  amount      Decimal?          @db.Decimal(18, 4)
+  fees        Decimal           @default(0) @db.Decimal(18, 4)
+  note        String            @db.VarChar(500)
+  depositId   Int?              @unique @map("deposit_id")
+  exitId      Int?              @unique @map("exit_id")
+  createdById Int               @map("created_by_id")
+  reversedAt  DateTime?         @map("reversed_at") @db.DateTime(3)
+  reverseNote String?           @map("reverse_note") @db.VarChar(500)
+  createdAt   DateTime          @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt   DateTime          @updatedAt @map("updated_at") @db.DateTime(3)
+
+  portfolio Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  holding   Holding?  @relation(fields: [holdingId], references: [id], onDelete: Restrict)
+
+  @@index([portfolioId, date])
+  @@map("portfolio_transactions")
+}
+
+/// Units issued (deposit approved) or redeemed (exit paid).
+model UnitEntry {
+  id           Int           @id @default(autoincrement())
+  portfolioId  Int           @map("portfolio_id")
+  membershipId Int           @map("membership_id")
+  kind         UnitEntryKind
+  /// Positive for ISSUE, negative for REDEEM.
+  units        Decimal       @db.Decimal(20, 6)
+  nav          Decimal       @db.Decimal(18, 6)
+  amount       Decimal       @db.Decimal(18, 4)
+  depositId    Int?          @unique @map("deposit_id")
+  exitId       Int?          @unique @map("exit_id")
+  createdAt    DateTime      @default(now()) @map("created_at") @db.DateTime(3)
+
+  portfolio  Portfolio  @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  membership Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+
+  @@index([membershipId])
+  @@map("unit_entries")
+}
+
+/// One row per portfolio per day, for the growth chart and statements.
+model NavSnapshot {
+  portfolioId Int      @map("portfolio_id")
+  date        DateTime @db.Date
+  navPerUnit  Decimal  @map("nav_per_unit") @db.Decimal(18, 6)
+  totalValue  Decimal  @map("total_value") @db.Decimal(18, 4)
+  cash        Decimal  @db.Decimal(18, 4)
+  invested    Decimal  @db.Decimal(18, 4)
+  totalUnits  Decimal  @map("total_units") @db.Decimal(20, 6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  portfolio Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+
+  @@id([portfolioId, date])
+  @@map("nav_snapshots")
+}
+
+model ExitRequest {
+  id              Int        @id @default(autoincrement())
+  portfolioId     Int        @map("portfolio_id")
+  membershipId    Int        @map("membership_id")
+  status          ExitStatus @default(REQUESTED)
+  reason          String?    @db.VarChar(500)
+  navAtApproval   Decimal?   @map("nav_at_approval") @db.Decimal(18, 6)
+  units           Decimal?   @db.Decimal(20, 6)
+  payoutAmount    Decimal?   @map("payout_amount") @db.Decimal(18, 4)
+  paidReference   String?    @map("paid_reference") @db.VarChar(120)
+  rejectionReason String?    @map("rejection_reason") @db.VarChar(500)
+  requestedAt     DateTime   @default(now()) @map("requested_at") @db.DateTime(3)
+  approvedAt      DateTime?  @map("approved_at") @db.DateTime(3)
+  paidAt          DateTime?  @map("paid_at") @db.DateTime(3)
+  decidedById     Int?       @map("decided_by_id")
+
+  portfolio  Portfolio  @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+  membership Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+
+  @@index([portfolioId, status])
+  @@map("exit_requests")
+}
+
+/// A real-world account holding the group's cash (bank, broker, eSewa).
+model CashAccount {
+  id          Int             @id @default(autoincrement())
+  portfolioId Int             @map("portfolio_id")
+  name        String          @db.VarChar(120)
+  kind        CashAccountKind
+  accountRef  String?         @map("account_ref") @db.VarChar(120)
+  /// Balance last reported by the institution.
+  balance     Decimal         @default(0) @db.Decimal(18, 4)
+  balanceAsOf DateTime?       @map("balance_as_of") @db.Date
+  createdAt   DateTime        @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt   DateTime        @updatedAt @map("updated_at") @db.DateTime(3)
+
+  portfolio Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+
+  @@map("cash_accounts")
+}
+
+/// Book cash compared with the sum of reported account balances at a point in time.
+model CashReconciliation {
+  id              Int      @id @default(autoincrement())
+  portfolioId     Int      @map("portfolio_id")
+  date            DateTime @db.Date
+  bookBalance     Decimal  @map("book_balance") @db.Decimal(18, 4)
+  reportedBalance Decimal  @map("reported_balance") @db.Decimal(18, 4)
+  difference      Decimal  @db.Decimal(18, 4)
+  adjustmentTxId  Int?     @map("adjustment_tx_id")
+  note            String   @db.VarChar(500)
+  createdById     Int      @map("created_by_id")
+  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  portfolio Portfolio @relation(fields: [portfolioId], references: [id], onDelete: Cascade)
+
+  @@map("cash_reconciliations")
+}
+
+model Notification {
+  id          Int              @id @default(autoincrement())
+  userId      Int              @map("user_id")
+  portfolioId Int?             @map("portfolio_id")
+  type        NotificationType
+  title       String           @db.VarChar(200)
+  body        String?          @db.VarChar(500)
+  link        String?          @db.VarChar(255)
+  readAt      DateTime?        @map("read_at") @db.DateTime(3)
+  createdAt   DateTime         @default(now()) @map("created_at") @db.DateTime(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@map("notifications")
+}
+
+/// Append-only: a database trigger rejects UPDATE and DELETE. No foreign keys,
+/// so entries outlive the users and portfolios they mention.
+model AuditLog {
+  id          BigInt   @id @default(autoincrement())
+  portfolioId Int?     @map("portfolio_id")
+  actorId     Int?     @map("actor_id")
+  actorName   String?  @map("actor_name") @db.VarChar(120)
+  action      String   @db.VarChar(60)
+  entityType  String?  @map("entity_type") @db.VarChar(40)
+  entityId    String?  @map("entity_id") @db.VarChar(40)
+  summary     String   @db.VarChar(500)
+  data        Json?
+  ip          String?  @db.VarChar(64)
+  createdAt   DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@index([portfolioId, createdAt])
+  @@index([actorId])
+  @@map("audit_logs")
+}
+
+model AbuseReport {
+  id             Int          @id @default(autoincrement())
+  reporterId     Int          @map("reporter_id")
+  portfolioId    Int?         @map("portfolio_id")
+  reportedUserId Int?         @map("reported_user_id")
+  reason         String       @db.VarChar(120)
+  details        String?      @db.Text
+  status         ReportStatus @default(OPEN)
+  resolutionNote String?      @map("resolution_note") @db.VarChar(500)
+  resolvedById   Int?         @map("resolved_by_id")
+  createdAt      DateTime     @default(now()) @map("created_at") @db.DateTime(3)
+  resolvedAt     DateTime?    @map("resolved_at") @db.DateTime(3)
+
+  @@index([status])
+  @@map("abuse_reports")
+}
+
+enum PlatformRole {
+  USER
+  PLATFORM_ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum PortfolioType {
+  GROUP
+  SOLO
+  MANAGED
+}
+
+enum PortfolioStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum MemberRole {
+  ADMIN
+  LEADER
+  MEMBER
+}
+
+enum MembershipStatus {
+  ACTIVE
+  EXITED
+  REMOVED
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  REVOKED
+}
+
+enum PaymentMethod {
+  BANK
+  ESEWA
+  KHALTI
+  CASH
+  OTHER
+}
+
+enum DepositStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum AssetType {
+  STOCK
+  MUTUAL_FUND
+  BOND
+  FIXED_DEPOSIT
+  GOLD
+  REAL_ESTATE
+  CRYPTO
+  OTHER
+}
+
+enum PriceSource {
+  MANUAL
+  NEPSE
+}
+
+enum TransactionType {
+  BUY
+  SELL
+  DIVIDEND
+  BONUS_SHARE
+  RIGHT_SHARE
+  FEE
+  WITHDRAWAL
+  DEPOSIT
+  EXIT_PAYOUT
+  ADJUSTMENT
+}
+
+enum TransactionStatus {
+  ACTIVE
+  REVERSED
+}
+
+enum UnitEntryKind {
+  ISSUE
+  REDEEM
+}
+
+enum ExitStatus {
+  REQUESTED
+  APPROVED
+  PAID
+  REJECTED
+  CANCELLED
+}
+
+enum CashAccountKind {
+  BANK
+  BROKER
+  ESEWA
+  CASH
+  OTHER
+}
+
+enum NotificationType {
+  PAYMENT_DUE
+  DEPOSIT_APPROVED
+  DEPOSIT_REJECTED
+  NEW_TRADE
+  EXIT_UPDATE
+  INVITATION
+  GENERAL
+}
+
+enum ReportStatus {
+  OPEN
+  RESOLVED
+  DISMISSED
+}

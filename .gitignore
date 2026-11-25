@@ -5,3 +5,6 @@ coverage/
 .env.*
 !.env.example
 *.log
+
+# Uploaded deposit screenshots and holding documents
+uploads/

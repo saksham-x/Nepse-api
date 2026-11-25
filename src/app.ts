@@ -9,6 +9,7 @@ import { AppError, ErrorCode } from './common/errors/app-error.js';
 import { errorHandler } from './common/middleware/error-handler.js';
 import { notFound } from './common/middleware/not-found.js';
 import { requestId } from './common/middleware/request-id.js';
+import { checkOrigin } from './modules/auth/auth.middleware.js';
 import { apiRouter } from './routes/index.js';
 
 export function createApp(): Express {
@@ -35,8 +36,9 @@ export function createApp(): Express {
   app.use(
     cors({
       origin: env.CORS_ORIGINS.includes('*') ? true : env.CORS_ORIGINS,
-      methods: ['GET', 'HEAD', 'OPTIONS'],
-      exposedHeaders: ['X-Request-Id'],
+      methods: ['GET', 'HEAD', 'OPTIONS', 'POST', 'PATCH', 'PUT', 'DELETE'],
+      credentials: true,
+      exposedHeaders: ['X-Request-Id', 'Content-Disposition'],
     }),
   );
   app.use(
@@ -50,6 +52,7 @@ export function createApp(): Express {
     }),
   );
   app.use(express.json({ limit: env.JSON_BODY_LIMIT }));
+  app.use('/api', checkOrigin);
 
   app.use('/api/v1', apiRouter);
 

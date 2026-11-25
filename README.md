@@ -60,6 +60,7 @@ NODE_OPTIONS=--use-system-ca npm start
 | `npm run db:seed` | Seed or refresh instruments from the symbol map |
 | `npm run sync` | Fetch the latest snapshot for every active instrument |
 | `npm run backfill -- --file x.csv` | Import historical daily candles from CSV |
+| `npm run make-platform-admin -- --email x` | Give an existing account the platform admin role (`--revoke` to remove it) |
 
 In production, the compiled jobs run as `node dist/jobs/sync-market-data.js` and `node dist/jobs/backfill-candles.js --file …`.
 
@@ -102,7 +103,7 @@ NABIL,2024-06-10,520.00,531.00,515.10,528.00,"104,233",812
 
 ## API
 
-Base path: `/api/v1`. Every route is a read-only `GET` with no authentication. Ingestion is only available through the CLI jobs, not over HTTP.
+Base path: `/api/v1`. The market-data routes below are read-only `GET`s with no authentication. Ingestion is only available through the CLI jobs (or the platform admin sync), not over HTTP. Accounts and portfolios use a login cookie; see [Accounts and portfolios](#accounts-and-portfolios).
 
 ### Conventions
 
@@ -301,6 +302,77 @@ Stack traces are only included when `NODE_ENV=development`. Database messages, p
 
 ---
 
+## Accounts and portfolios
+
+Group investment portfolios: members pay a monthly contribution, the admin invests it, and everyone owns **units** of the pool. Two web apps use these routes: the member area and platform admin in `nepse-summary-frontend`, and the portfolio admin portal in `nepse-admin`.
+
+### Setup
+
+```bash
+npm run db:deploy                                  # adds the account and portfolio tables
+npm run make-platform-admin -- --email you@example.com   # after signing up on the site
+```
+
+Or list platform admins in `PLATFORM_ADMIN_EMAILS`, and they are promoted when they sign up or log in. Uploaded files go to `UPLOAD_DIR` (default `./uploads`, git-ignored).
+
+### How the money works
+
+- **Units, like a mutual fund.** NAV per unit = (cash + market value of holdings) ÷ total units. Before any units exist it is the portfolio's starting unit price (default Rs 10). An approved deposit buys units at the NAV *just before* it, so it neither dilutes nor benefits existing members. Units are rounded down to 6 decimals.
+- **Cash and holdings are never stored as balances.** They are recomputed by replaying the portfolio's active transactions in date order (`src/modules/portfolios/ledger.ts`, unit-tested). So editing or reversing a transaction always leaves consistent numbers, and a change that would make a later sale exceed the holding is refused.
+- **Total invested** = approved deposits − exit payouts. **Profit** = current value − invested.
+- **Exits.** Approving fixes the payout at that day's NAV. Marking it paid records the cash out, redeems the units and closes the membership.
+- **Contributions.** A month is owed from the member's join month (or the earliest month they paid for). It is *late* after the due day + grace days. The late fee is added unless the full amount had been submitted by then. For a manual cash deposit, `receivedOn` sets the date that counts.
+- **Prices.** Holdings priced from `NEPSE` take the stored quote (kept fresh by `npm run sync` or the live feed) whenever it is newer. *Sync prices* can also refetch the portfolio's symbols first. `MANUAL` prices are set by an admin or leader.
+- A NAV snapshot is upserted once a day whenever a portfolio is viewed or changed. These drive the growth chart and month-end statement values.
+- Every write that depends on NAV takes a `SELECT … FOR UPDATE` lock on the portfolio row, so concurrent approvals can't price units off the same NAV.
+
+### Roles
+
+| | Admin | Leader | Member |
+| --- | --- | --- | --- |
+| Member area (dashboard, deposits, statements, exit…) | ✓ | ✓ | ✓ |
+| Admin portal: view dashboard, members, deposits, tracker, holdings, transactions, reports, settings | ✓ | ✓ | |
+| Approve or reject deposits, record cash deposits, send reminders, update prices | ✓ | ✓ | |
+| Invite, remove, change roles; transactions; cash; exits; settings; audit log | ✓ | | |
+
+A portfolio always keeps at least one admin. A member holding units can't be removed. They leave through an exit, which pays them out.
+
+**Platform admins** use `/platform/*`. This needs the role *and* a recent **Sign in as admin** (password re-entered, which sets `sessions.admin_until` for `ADMIN_SESSION_MINUTES`). With that active they can also read any portfolio's admin routes, but never write to them (support "view as admin" mode, error `READ_ONLY`). A suspended portfolio is read-only for everyone (`PORTFOLIO_SUSPENDED`). Suspending a user signs them out everywhere.
+
+### Security
+
+- Passwords: scrypt (N=16384, r=8, p=1, 16-byte salt). Unknown emails take the same time to reject.
+- Sessions: a random 256-bit token in an `httpOnly`, `SameSite=Lax` cookie (`Secure` in production). Only its SHA-256 is stored. Changing your password signs out your other sessions.
+- CSRF: on top of SameSite, writes from a browser must come from an origin in `CORS_ORIGINS` (any `localhost` port in development).
+- Rate limits: `AUTH_RATE_LIMIT_MAX` login, register and password attempts per IP per 15 minutes, on top of the global API limit.
+- Uploads: PNG, JPEG or WebP screenshots, and PDF, image, DOCX or XLSX documents, up to `UPLOAD_MAX_MB`. The file's leading bytes must match its declared type. Files are stored under random names outside any static folder and only served through routes that check access. Non-images download as attachments.
+- Audit log: append-only. A MySQL trigger rejects every `UPDATE` and `DELETE` on `audit_logs`, even from the app's own database user. It has no foreign keys, so entries outlive deleted users and portfolios.
+- Notifications are in-app only. No email or SMS is sent, so there is no password reset by email yet.
+
+### Routes
+
+All under `/api/v1`. Writes take JSON, except the two uploads (multipart). Same success and error shapes as above.
+
+| Route | What it does |
+| --- | --- |
+| `POST /auth/register`, `POST /auth/login`, `POST /auth/logout` | Sign up, sign in (sets the cookie), sign out |
+| `GET /auth/session` | Current user, or `null` when signed out (no 401) |
+| `GET /auth/me`, `PATCH /auth/me` | Profile, language (`en`/`ne`), theme, notification preferences |
+| `POST /auth/me/password` | Change password |
+| `POST /auth/admin-session`, `DELETE /auth/admin-session` | Sign in as admin (password) / leave admin mode |
+| `GET /me/home` | Portfolio cards, net worth, payments due, notifications, invitations |
+| `GET /me/notifications`, `POST /me/notifications/read` | Alerts |
+| `POST /me/invitations/:id/accept` \| `decline` | Join a portfolio |
+| `POST /me/portfolios` | Create a portfolio (you become its admin) |
+| `POST /me/reports` | Report abuse to the platform team |
+| **Member** `…/portfolios/:id` | `GET /` summary · `/growth` · `/breakdown` · `/deposit-info` · `GET/POST /deposits` (POST: multipart `screenshot`) · `/deposits/:d/screenshot` · `/deposits/:d/receipt` (PDF) · `/contributions` · `/contributions/group` · `/holdings` · `/holdings/:h` · `/holdings/:h/documents/:doc` · `/activity` · `/statements` · `/statements/:YYYY-MM` (PDF) · `GET/POST /exit` · `POST /exit/:e/cancel` · `/members` |
+| **Admin** `…/portfolios/:id/admin` | `/dashboard` · `/members`, `/members/:m` (PATCH role, DELETE) · `POST /invitations`, `DELETE /invitations/:i` · `/deposits?status=` · `POST /deposits/:d/approve` \| `reject` · `POST /deposits/manual` · `/tracker` · `POST /reminders` · `/holdings` (POST, PATCH `/:h`) · `POST /holdings/:h/price` · `POST /holdings/sync-prices` · `POST /holdings/:h/documents` (multipart `file`), `DELETE …/:doc` · `/transactions` (POST, PATCH `/:t`, `POST /:t/reverse`; a `note` is always required) · `/cash` · `/cash/accounts` (POST, PATCH, DELETE) · `POST /cash/reconcile` · `/exits` · `POST /exits/:e/approve` \| `reject` \| `paid` · `/reports/statement?month=&membershipId=&format=pdf\|xlsx` · `GET/PATCH /settings` · `/audit` |
+| **Platform** `/platform` | `/stats` · `/users` (PATCH status/role, DELETE) · `/portfolios` (PATCH status, DELETE with `confirmName`) · `GET/POST /sync` · `/prices/:symbol` · `PATCH /prices/:symbol/candles/:date` · `PATCH /prices/:symbol/quote` · `/reports` (PATCH) · `/audit` |
+
+New error codes: `UNAUTHENTICATED` 401, `INVALID_CREDENTIALS` 401, `ACCOUNT_SUSPENDED` 403, `EMAIL_TAKEN` 409, `FORBIDDEN` 403, `ADMIN_SESSION_REQUIRED` 403, `READ_ONLY` 403, `PORTFOLIO_SUSPENDED` 403, `NOT_FOUND` 404, `INVALID_STATE` 409 (wrong status for the action, e.g. approving an already approved deposit), `FILE_REJECTED` 400.
+
+---
+
 ## Design
 
 ### Folder structure
@@ -312,6 +384,7 @@ src/
   config/                     env (Zod), logger (Pino), prisma client
   common/
     errors/app-error.ts       AppError + stable error codes
+    uploads.ts                multer storage, content sniffing, authorized file serving
     middleware/               request-id, not-found, error-handler
     utils/                    time (Kathmandu calendar), serialization, concurrency
   modules/
@@ -319,6 +392,10 @@ src/
     market-data/              candles (paging, aggregation), quotes
     realtime/                 Socket.IO server + live feed poller
     indicators/               SMA/EMA/RSI/MACD (pure functions in calculations/)
+    auth/                     scrypt passwords, cookie sessions, "sign in as admin"
+    portfolios/               ledger (pure accounting), member + admin routes, statements (PDF/XLSX)
+    platform/                 platform admin routes
+    audit/, notifications/    append-only audit log, in-app alerts
     ingestion/
       ingestion.service.ts    sync, CSV backfill, on-demand refresh
       ingestion.repository.ts bulk writes, runs, lock
